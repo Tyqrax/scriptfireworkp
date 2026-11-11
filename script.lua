@@ -17,6 +17,15 @@ local delayMs = 100
 local STEP, MIN, MAX = 100, 100, 10000
 local enabled = false
 
+-- Zünden + Nachladen
+local ZUEND_TOOL = "RemoteDetonator"
+local REFILL_NAME = "\195\150\204\183\204\140\204\139"
+local cycleMin = 5         -- Intervall in Minuten (1-60)
+local autoCycle = false
+local lastCycle = 0
+local cycleBusy = false
+local refillRemote
+
 local EXCLUDE = {
     ["RemoteDetonator"] = true,
 }
@@ -269,6 +278,62 @@ local function fire(tool)
     return true
 end
 
+-- Zünden + Nachladen
+local function findRefill()
+    if refillRemote and refillRemote.Parent then return refillRemote end
+    for _, f in ipairs(RS:GetChildren()) do
+        if f:IsA("Folder") then
+            local r = f:FindFirstChild(REFILL_NAME)
+            if r and r:IsA("RemoteFunction") then
+                refillRemote = r
+                return r
+            end
+        end
+    end
+end
+
+local function runCycle()
+    cycleBusy = true
+    lastCycle = os.clock()
+
+    -- 1. Zünden
+    local char = player.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    local bp = player:FindFirstChild("Backpack")
+    local tool = (char and char:FindFirstChild(ZUEND_TOOL)) or (bp and bp:FindFirstChild(ZUEND_TOOL))
+    if hum and tool then
+        local prev = char:FindFirstChildOfClass("Tool")
+        if prev == tool then prev = nil end
+        hum:EquipTool(tool)
+        task.wait(0.4)
+        tool:Activate()
+        task.wait(0.6)
+        if prev and prev.Parent then hum:EquipTool(prev) end
+    else
+        setStatus("Detonator nicht gefunden")
+    end
+
+    -- 2. Sofort nachladen
+    local r = findRefill()
+    if r then
+        local ok, res = pcall(function()
+            return r:InvokeServer({Type = "RefreshStacks"})
+        end)
+        if ok then
+            setStatus("Gezündet + nachgeladen")
+        else
+            refillRemote = nil
+            setStatus("Nachladen Fehler")
+        end
+    else
+        setStatus("Nachlade-Remote nicht gefunden")
+    end
+
+    task.wait(0.3)
+    lastCycle = os.clock()
+    cycleBusy = false
+end
+
 -- UI
 local parent = (gethui and gethui()) or game:GetService("CoreGui")
 local old = parent:FindFirstChild("PlaceControlGui")
@@ -294,7 +359,7 @@ local function mkBtn(par, text, x, y, w, h, color)
 end
 
 local frame = Instance.new("Frame")
-frame.Size = UDim2.new(0, 220, 0, 214)
+frame.Size = UDim2.new(0, 220, 0, 282)
 frame.Position = UDim2.new(0.5, -110, 0.08, 0)
 frame.BackgroundColor3 = Color3.fromRGB(30, 30, 35)
 frame.BorderSizePixel = 0
@@ -343,10 +408,62 @@ statusLabel.Parent = frame
 local profToggle = mkBtn(frame, "Profile ein/aus", 10, 146, 200, 28)
 local scanToggle = mkBtn(frame, "Scan-Fenster ein/aus", 10, 178, 200, 28)
 
+-- Zünden + Nachladen: Minuten wählen
+local cMinus = mkBtn(frame, "-", 10, 210, 40, 30)
+cMinus.TextSize = 20
+local cPlus = mkBtn(frame, "+", 170, 210, 40, 30)
+cPlus.TextSize = 20
+
+local cLabel = Instance.new("TextLabel")
+cLabel.Size = UDim2.new(0, 100, 0, 30)
+cLabel.Position = UDim2.new(0, 60, 0, 210)
+cLabel.BackgroundTransparency = 1
+cLabel.TextColor3 = Color3.new(1, 1, 1)
+cLabel.Font = Enum.Font.Gotham
+cLabel.TextSize = 13
+cLabel.Parent = frame
+
+local cycleBtn = mkBtn(frame, "Zünden + Nachladen: AUS", 10, 244, 200, 30, Color3.fromRGB(170, 50, 50))
+
 setStatus = function(t) statusLabel.Text = t end
 
 local function refreshSpeed() speedLabel.Text = delayMs .. " ms" end
 refreshSpeed()
+
+local function refreshCycleLabel()
+    if autoCycle then
+        local left = math.max(0, math.ceil(cycleMin * 60 - (os.clock() - lastCycle)))
+        cLabel.Text = cycleMin .. " min (" .. math.floor(left / 60) .. ":" .. string.format("%02d", left % 60) .. ")"
+    else
+        cLabel.Text = cycleMin .. " min"
+    end
+end
+refreshCycleLabel()
+
+cMinus.MouseButton1Click:Connect(function()
+    cycleMin = math.max(1, cycleMin - 1)
+    refreshCycleLabel()
+end)
+
+cPlus.MouseButton1Click:Connect(function()
+    cycleMin = math.min(60, cycleMin + 1)
+    refreshCycleLabel()
+end)
+
+cycleBtn.MouseButton1Click:Connect(function()
+    autoCycle = not autoCycle
+    cycleBtn.Text = autoCycle and "Zünden + Nachladen: AN" or "Zünden + Nachladen: AUS"
+    cycleBtn.BackgroundColor3 = autoCycle and Color3.fromRGB(50, 150, 70) or Color3.fromRGB(170, 50, 50)
+    lastCycle = os.clock()
+    refreshCycleLabel()
+end)
+
+task.spawn(function()
+    while gui.Parent do
+        refreshCycleLabel()
+        task.wait(1)
+    end
+end)
 
 -- Profil-Fenster (rechts)
 local pframe = Instance.new("Frame")
@@ -643,6 +760,11 @@ end)
 task.spawn(function()
     while gui.Parent do
         if enabled then
+            -- Zünden + Nachladen, wenn die eingestellte Zeit abgelaufen ist
+            if autoCycle and not cycleBusy and os.clock() - lastCycle >= cycleMin * 60 then
+                runCycle()
+            end
+
             local sent = false
             local tools = scanTools()
             local byName = {}
