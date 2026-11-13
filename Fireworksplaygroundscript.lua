@@ -20,6 +20,7 @@ local enabled = false
 -- Zünden + Nachladen
 local ZUEND_TOOL = "RemoteDetonator"
 local REFILL_NAME = "\195\150\204\183\204\140\204\139"
+local BLOCK_MANUAL = true  -- true = Detonator wird nur vom Timer gezündet
 local cycleMin = 5         -- Intervall in Minuten (1-60)
 local autoCycle = false
 local lastCycle = 0
@@ -301,14 +302,18 @@ local function runCycle()
     local hum = char and char:FindFirstChildOfClass("Humanoid")
     local bp = player:FindFirstChild("Backpack")
     local tool = (char and char:FindFirstChild(ZUEND_TOOL)) or (bp and bp:FindFirstChild(ZUEND_TOOL))
-    if hum and tool then
+    if hum and tool and bp then
         local prev = char:FindFirstChildOfClass("Tool")
         if prev == tool then prev = nil end
         hum:EquipTool(tool)
         task.wait(0.4)
         tool:Activate()
         task.wait(0.6)
-        if prev and prev.Parent then hum:EquipTool(prev) end
+        if prev and prev.Parent then
+            hum:EquipTool(prev)
+        else
+            tool.Parent = bp   -- Detonator immer zurück in den Rucksack
+        end
     else
         setStatus("Detonator nicht gefunden")
     end
@@ -316,7 +321,7 @@ local function runCycle()
     -- 2. Sofort nachladen
     local r = findRefill()
     if r then
-        local ok, res = pcall(function()
+        local ok = pcall(function()
             return r:InvokeServer({Type = "RefreshStacks"})
         end)
         if ok then
@@ -330,7 +335,7 @@ local function runCycle()
     end
 
     task.wait(0.3)
-    lastCycle = os.clock()
+    lastCycle = os.clock()   -- Timer startet erst jetzt, nach Ende des Durchlaufs
     cycleBusy = false
 end
 
@@ -442,11 +447,13 @@ refreshCycleLabel()
 
 cMinus.MouseButton1Click:Connect(function()
     cycleMin = math.max(1, cycleMin - 1)
+    lastCycle = os.clock()   -- Timer neu starten, damit es nicht sofort zündet
     refreshCycleLabel()
 end)
 
 cPlus.MouseButton1Click:Connect(function()
     cycleMin = math.min(60, cycleMin + 1)
+    lastCycle = os.clock()
     refreshCycleLabel()
 end)
 
@@ -462,6 +469,19 @@ task.spawn(function()
     while gui.Parent do
         refreshCycleLabel()
         task.wait(1)
+    end
+end)
+
+-- Wächter: Detonator darf nur vom Timer ausgerüstet werden
+task.spawn(function()
+    while gui.Parent do
+        if BLOCK_MANUAL and not cycleBusy then
+            local char = player.Character
+            local bp = player:FindFirstChild("Backpack")
+            local t = char and char:FindFirstChild(ZUEND_TOOL)
+            if t and bp then t.Parent = bp end
+        end
+        task.wait(0.1)
     end
 end)
 
@@ -739,6 +759,7 @@ toggle.MouseButton1Click:Connect(function()
     toggle.Text = enabled and "AN" or "AUS"
     toggle.BackgroundColor3 = enabled and Color3.fromRGB(50, 150, 70) or Color3.fromRGB(170, 50, 50)
     if enabled then
+        lastCycle = os.clock()   -- Zünd-Timer startet beim Einschalten neu
         resetState()
         refreshScanList()
     else
@@ -760,9 +781,15 @@ end)
 task.spawn(function()
     while gui.Parent do
         if enabled then
-            -- Zünden + Nachladen, wenn die eingestellte Zeit abgelaufen ist
+            -- Zünden + Nachladen: nur wenn kein Durchlauf läuft und die volle Zeit
+            -- seit dem Ende des letzten Durchlaufs vergangen ist
             if autoCycle and not cycleBusy and os.clock() - lastCycle >= cycleMin * 60 then
-                runCycle()
+                local ok = pcall(runCycle)
+                if not ok then
+                    cycleBusy = false
+                    lastCycle = os.clock()
+                    setStatus("Zyklus-Fehler, Timer neu gestartet")
+                end
             end
 
             local sent = false
@@ -834,6 +861,8 @@ task.spawn(function()
             end
             if not sent then task.wait(0.2) end
         else
+            -- Bei AUS bleibt der Zünd-Timer auf voller Zeit stehen
+            if autoCycle and not cycleBusy then lastCycle = os.clock() end
             task.wait(0.1)
         end
     end
